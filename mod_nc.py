@@ -1,0 +1,72 @@
+''' mod_nc
+    Author: Alex Paterson
+    
+Contains functions for postprocessing of the GFDL output .nc datafiles
+'''
+from __future__ import division
+import numpy as np
+from useful import *
+
+import os
+import sys
+
+
+def tropopause_calc(ds_mean):
+    '''run the zonal mean tropopause height calculation'''
+    i = 0
+    h_trop_calc = np.zeros((ds_mean.temp.shape[0], ds_mean.temp.shape[2]))
+    mean_temp = ds_mean.temp.isel(time=-1).mean().values
+    for k in range(ds_mean.temp.shape[0]):
+        for j in range(ds_mean.temp.shape[2]):
+            h_trop_calc[k,j] = calc_tropopause(ds_mean.temp.isel(time=k,lat=j).values, ds_mean.pfull.values, mean_temp)
+            i += 1
+            percent = i/h_trop_calc.size*100
+            sys.stdout.write("\rTropopause: %.2f%%" % percent)
+            sys.stdout.flush()
+    ds_mean['h_trop_calc'] = (('time', 'lat'), h_trop_calc/1000)
+    ds_mean['p_trop_calc'] = (('time', 'lat'), 1000*np.exp(-9.81/(287.04*mean_temp)*h_trop_calc))
+    ds_mean.coords['h'] = 287.04*mean_temp/9.81*np.log(1000/ds_mean.pfull)
+    return ds_mean
+
+        
+def main():
+    data_dir = '/scratch/ap587/dry_data/'
+    exp = 'exp11'
+    exps = []
+    for name in os.listdir(data_dir):
+        if name.split('_')[0] == exp:
+            exps += [name]
+    # old code for running specific parts of an experiment
+    #vals = [0.1, 0.5, 1, 2, 4, 8]
+    #exps = [exp+'%.1f' % val for val in vals]
+    #exps = ['exp4_HS_hc2000.0']
+    
+    save_dir = '/scratch/ap587/dry_data/processed/'
+    ncfile='daily_zmean.nc'
+    runs = range(0,49)
+    for exp in exps:
+        sys.stdout.write("Processing experiment " + exp + '\n')
+        ds = open_runset(data_dir, exp+'/', runs)
+        #ds = emf_calc(ds)
+        ds_mean = ds.mean('lon')
+        ds_mean.load()
+        sys.stdout.write("Dataset loaded, computing\n")
+        if ('h_trop' in ds.keys()):
+            ds_mean['p_trop'] = 1000*np.exp(-9.81/(287.04*ds_mean.temp.isel(time=-1).mean().values)*ds_mean.h_trop*1000) 
+            ds_mean = tropopause_calc(ds_mean)
+        ds_mean = psi_calc(ds_mean)        
+        ds_mean.time.data = ds_mean.time.data/24 - 1
+        ds_mean.coords['year'] = ds_mean.time//360
+        ds_mean.coords['day'] = ds_mean.time%360
+        lag = calc_seasonal_lag(ds.teq)
+        if np.isnan(lag):
+            lag = 0
+        ds.coords['day_cor'] = (ds_mean.day-lag+45)%360
+        ds.coords['season'] = np.floor(ds_mean.day_cor/90)
+        
+        #ds_mean = ds_mean.isel(time=slice(720,None))  # only include data after spin-ups
+        
+        save_runset(save_dir, exp, ds_mean, ncfile)
+
+if __name__ == "__main__":
+    main()
