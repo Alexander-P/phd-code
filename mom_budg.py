@@ -82,7 +82,7 @@ def prepare_data(data, exp):
     ds = open_zmean_runset('/scratch/ap587/dry_data/', exp)
     ds = ds.isel(time=slice(720,None))
     lag = calc_seasonal_lag(ds.teq)
-    data.coords['xofyear'] = np.mod( data.time+45+lag, 360.) //90 + 1
+    data.coords['xofyear'] = np.mod( data.time-lag+45, 360.) //90 + 1
     
     #needs the processed file to exist --- add error handling here
     
@@ -114,7 +114,7 @@ def mom_budg_hm(exp, lev=150, filename='plev_pentad', timeav='pentad', period_fa
     mkdir = sh.mkdir.bake('-p')
     mkdir(plot_dir)
         
-    data = open_runset('/scratch/ap587/dry_data/', exp+'/', range(8,100))
+    data = open_runset('/scratch/ap587/dry_data/', exp+'/', range(9,100))
     data = prepare_data(data,exp)
     
     if lonin[1]>lonin[0]:
@@ -431,6 +431,7 @@ for name in os.listdir('/scratch/ap587/dry_data/'):
 
 #exps = ['exp2_hc50.0', 'exp4_HS_hc2000.0', 'exp5_obl60.0', 'exp8-ml50_tau0.1']
 #exps = ['exp4_HS_hc2000.0']
+exps = ['exp9v1_hc30.0-obl30.0']
 for exp in exps:
     print(exp)
     mom_budg_hm(exp,lev=200)

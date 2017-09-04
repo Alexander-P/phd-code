@@ -41,6 +41,15 @@ def open_zmean_runset(data_dir, exp):
     else:
         return None
     
+def open_climatology(data_dir, exp):
+    import os.path
+    fnames = os.path.join(data_dir, 'climatologies', exp, 'climatology.nc')
+    if fnames:
+        import xarray as xr
+        return xr.open_mfdataset(fnames, decode_times=False)
+    else:
+        return None
+    
 def save_runset(save_dir, exp, ds, ncfile='daily.nc'):
     import os.path
     dest = os.path.join(save_dir, exp + '/')
@@ -259,7 +268,7 @@ def check_spinup(data):
 def calc_pot_temp(ds):
     p0 = 1000
     R_cp = 0.286    # for dry air
-    ds['pot_temp'] = (('time','pfull','lat'), ds.temp*(p0/ds.pfull)**R_cp)
+    ds['pot_temp'] = (ds.temp.dims, ds.temp*(p0/ds.pfull)**R_cp)
     return ds
 
 def calc_bv_freq(ds):
@@ -283,47 +292,111 @@ def calc_eady_growth(ds):
     ds['eady'] = 0.3098*9.81*abs(f)*abs(du/dz)/ds.bv
     return ds
 
+def running_mean(y, dim=0, window=1):
+    '''Calculate a mean along dimension dim of y with a window of specified size -- required odd'''
+    if window%2 == 0:
+        print('window needs to be odd')
+    cumsum = np.cumsum(np.insert(y, 0, 0))
+    return (cumsum[window:] - cumsum[:-window]) / window
+
+def nan_running_mean(y, dim=0, window=1):
+    '''running mean but padded to original shape with np.nan'''
+
+    nan_rm = np.full(y.shape, np.nan)
+    rm = running_mean(y, dim, window)    
+    nan_rm[window//2:-window//2+1] = rm    
+    return nan_rm
+
+
 def calc_itcz_lat(ds, do_plot=False):
     '''Locate the latitude of the ITCZ using ds.omega, the vertical velocity
         ds: dataarray with dimensions (pfull, lat)'''
-    itcz = np.nan
     x = ds.lat.values
-    y = (-ds.omega).isel(pfull=slice(-16,-1)).sum('pfull')
+    y = (-ds.omega).isel(pfull=slice(-16,-1)).sum('pfull').values
    
-    roll_y = y.rolling(center=True, lat=7).mean()
-    droll_y = roll_y.diff('lat')
-    ddroll_y = droll_y.diff('lat')
-    roots = calc_roots(droll_y.lat.values, droll_y.values)
+    run_y = nan_running_mean(y, window=9)
+    drun_y = np.gradient(run_y)
+    ddrun_y = np.gradient(drun_y)
+    roots = calc_roots(x, drun_y)
     
     vals = []
     for root in roots:
         i = (np.abs(x-root)).argmin()
-        vals.append((root, i, float(roll_y.isel(lat=i).values), float(ddroll_y.isel(lat=i).values)))
+        vals.append((root, i, float(run_y[i]), float(ddrun_y[i])))
 
     # vals is a list of [root, root_index, omega, dd_omega] lists
     vals.sort(key=lambda tup: tup[2], reverse=True)
     #print vals
-    selected_point = 0
-    n = 0
-    while (not selected_point) and (n < len(vals)):
-        if vals[n][3] < 0:
-            itcz = vals[n][0]
-            selected_point = 1
-        n += 1
-            
+
+    itcz = 90
+    for val in vals:
+        if (val[3] < 0) and (np.abs(val[0]) < np.abs(itcz)) and (val[2] > 0.5*vals[0][2]):
+            itcz = val[0]
+    if itcz == 90:
+        itcz = np.nan
+        
     if (do_plot == True):
         fig,ax = plt.subplots()
         plt.plot(x, y, label='omega')
-        roll_y.plot(label='rolling_mean')
-        droll_y.plot(label='d(rolling)')
-        ddroll_y.plot(label='dd(rolling)')
+        plt.plot(x, run_y, label='running mean')
+        plt.plot(x, drun_y, label='d(runing)')
+        plt.plot(x, ddrun_y, label='dd(runing)')
         [ax.axvline(extreme, color='k', linewidth=0.5) for extreme in roots]
         ax.axvline(itcz, color='r', linewidth=1)
-        plt.legend(loc=3)
+        #ax.set_xlim([-30,30])
+        #ax.set_ylim([-0.5,0.5])
+        plt.legend(loc=1)
         plt.grid()
         
     if (np.isnan(itcz)):
         print('No ITCZ found, returning nan')
+    return itcz
+
+
+def calc_descending_branch(ds, do_plot=False):
+    '''Locate the latitude of the descending branch of the Hadley cell using 
+    ds.omega, the vertical velocity.
+    Can def merge this with itcz latitude
+        ds: dataarray with dimensions (pfull, lat)'''
+    x = ds.lat.values
+    y = (-ds.omega).isel(pfull=slice(-16,-1)).sum('pfull').values
+   
+    run_y = nan_running_mean(y, window=9)
+    drun_y = np.gradient(run_y)
+    ddrun_y = np.gradient(drun_y)
+    roots = calc_roots(x, drun_y)
+    
+    vals = []
+    for root in roots:
+        i = (np.abs(x-root)).argmin()
+        vals.append((root, i, float(run_y[i]), float(ddrun_y[i])))
+
+    # vals is a list of [root, root_index, omega, dd_omega] lists
+    vals.sort(key=lambda tup: tup[2], reverse=False)
+    #print vals
+
+    itcz = 90
+    for val in vals:
+        if (val[3] > 0) and (np.abs(val[0]) < np.abs(itcz)) and (val[2] < 0.5*vals[0][2]):
+            itcz = val[0]
+    if itcz == 90:
+        itcz = np.nan
+        
+    if (do_plot == True):
+        fig,ax = plt.subplots()
+        plt.plot(x, y, label='omega')
+        plt.plot(x, run_y, label='running mean')
+        plt.plot(x, drun_y, label='d(runing)')
+        plt.plot(x, ddrun_y, label='dd(runing)')
+        [ax.axvline(extreme, color='k', linewidth=0.5) for extreme in roots]
+        ax.axvline(itcz, color='r', linewidth=1)
+        #ax.set_xlim([-30,30])
+        #ax.set_ylim([-0.5,0.5])
+        plt.legend(loc=1)
+        plt.grid()
+        
+    if (np.isnan(itcz)):
+        print('No descending point found, returning nan')
     return itcz
     
 
@@ -331,7 +404,7 @@ def calc_itcz_lat(ds, do_plot=False):
 '''Hadley cell width calculations'''
 ######################
 
-def get_hc_edges(ds, method='psi', threshold=0, do_plot=0):
+def calc_hc_edges(ds, method='psi', threshold=0, do_plot=0):
     '''
     locate the two Hadley cell and return its width
     arguments:
@@ -497,14 +570,17 @@ def calc_roots(x,y,do_plot=0):
     Outputs:
         roots: list of roots
     '''
+    
+    if len(x) != len(y):
+        raise ValueError('x and y must have the same dimensions, currently {} and {}'.format(len(x), len(y)))
     roots = []
     for i, val in enumerate(y[5:-5],start=5):
         if not (np.sign(y[i]) == np.sign(y[i+1])):
             roots += [x[i] + (x[i+1]-x[i])*(y[i]/(y[i]-y[i+1]))]
     if do_plot:
-        plt.subplots()
-        plt.plot(x,y)
-        plt.plot(roots,np.zeros(len(roots)),'rx')
+        fig, ax = plt.subplots()
+        ax.plot(x,y)
+        [ax.axvline(root, color='r') for root in roots]
     return roots
                         
 def calc_roots_sign(x,y,do_plot=0):
@@ -531,19 +607,47 @@ def calc_hc_width(ds, rot=7.3e-5):
         static stability is the difference between the ground level and tropopause level potential temp
         del_h is the fractional eq-pole pot temp difference
     '''
-    tp_height = ds.h_trop.isel(lat=slice(20,44)).mean('lat').mean('time')
-    tp_pres = ds.p_trop.isel(lat=slice(20,44)).mean('lat').mean('time')
+    tp_height = ds.h_trop.isel(lat=slice(20,44)).mean('lat')
+    tp_pres = ds.p_trop.isel(lat=slice(20,44)).mean('lat')
     ds = calc_pot_temp(ds)
     #static_stab = (ds.pot_temp.isel(lat=slice(20,44)).sel(pfull=tp_pres, method='nearest').mean('lat').mean('time') -                    ds.pot_temp.isel(lat=slice(20,44),pfull=-1).mean('lat').mean('time'))
     p0 = 1000
     R_cp = 0.286    # for dry air
-    ds['rbal_pot_temp'] = (('time','pfull','lat'), ds.teq*(p0/ds.pfull)**R_cp)
-    del_h = ((ds.pot_temp.isel(lat=slice(30,34)).isel(pfull=-1).mean('lat').mean('time')-
-                   ds.pot_temp.isel(lat=slice(0,4)).isel(pfull=-1).mean('lat').mean('time'))/
-             ds.pot_temp.isel(lat=slice(30,34)).isel(pfull=-1).mean('lat').mean('time'))
+    ds['rbal_pot_temp'] = (ds.teq.dims, ds.teq*(p0/ds.pfull)**R_cp)
+    del_h_S = ((ds.pot_temp.isel(lat=slice(30,34)).isel(pfull=-1).mean('lat')-
+                   ds.pot_temp.isel(lat=slice(0,4)).isel(pfull=-1).mean('lat'))/
+             ds.pot_temp.isel(lat=slice(30,34)).isel(pfull=-1).mean('lat'))
+    del_h_N = ((ds.pot_temp.isel(lat=slice(30,34)).isel(pfull=-1).mean('lat')-
+                   ds.pot_temp.isel(lat=slice(60,None)).isel(pfull=-1).mean('lat'))/
+             ds.pot_temp.isel(lat=slice(30,34)).isel(pfull=-1).mean('lat'))
+    del_h = np.max(del_h_S, del_h_N)
     R = (9.81*tp_height*1e3*del_h)/((rot)**2 * (6371e3)**2)
     ccw = (5/3 * R)**0.5
     return np.rad2deg(ccw.values)
+
+def calc_heldhou(ds, rot=7.3e-5):
+    
+    r_cp = 0.286
+    itcz = calc_itcz_lat(ds)
+    if not np.isnan(itcz):
+        trop_h = ds.h_trop_calc.sel(lat=np.arange(itcz-10,itcz+10,ds.lat[2]-ds.lat[1]), method='nearest').mean('lat').values
+        trop_p = ds.p_trop_calc.sel(lat=np.arange(itcz-10,itcz+10,ds.lat[2]-ds.lat[1]), method='nearest').mean('lat').values
+        ds = calc_pot_temp(ds)
+        ds = ds.isel(pfull=-1)
+        del_h_S = ((ds.pot_temp.sel(lat=np.arange(itcz-10,itcz+10,ds.lat[2]-ds.lat[1]), method='nearest').mean('lat')-
+                   ds.pot_temp.sel(lat=np.arange(-88,-68,ds.lat[2]-ds.lat[1]), method='nearest').mean('lat'))/
+                   ds.pot_temp.sel(lat=np.arange(itcz-10,itcz+10,ds.lat[2]-ds.lat[1]), method='nearest').mean('lat')).values
+        del_h_N = ((ds.pot_temp.sel(lat=np.arange(itcz-10,itcz+10,ds.lat[2]-ds.lat[1]), method='nearest').mean('lat')-
+                   ds.pot_temp.sel(lat=np.arange(68,88,ds.lat[2]-ds.lat[1]), method='nearest').mean('lat'))/
+             ds.pot_temp.sel(lat=np.arange(itcz-10,itcz+10,ds.lat[2]-ds.lat[1]), method='nearest').mean('lat')).values
+    
+        del_h = np.array((del_h_S, del_h_N))
+        R = (9.81*trop_h*1e3*del_h)/((rot)**2 * (6371e3)**2)
+        return np.rad2deg((5/3 * R)**0.5)
+    else:
+        return (np.nan, np.nan)
+    
+    
     
 def peak_emf(ds):
     '''
@@ -555,9 +659,15 @@ def peak_emf(ds):
     return (ds.lat.isel(lat=mini).values, ds.lat.isel(lat=maxi).values)
     
 def psi_calc(ds_mean):
-    data = {'omega':ds_mean.omega.data, 'vcomp':ds_mean.vcomp.data, 'time':ds_mean.time.data, 'pfull':ds_mean.pfull.data, 'lat':ds_mean.lat.data}
+    if 'time' in ds_mean.dims:
+        data = {'omega':ds_mean.omega.data, 'vcomp':ds_mean.vcomp.data, 'time':ds_mean.time.data, 'pfull':ds_mean.pfull.data, 'lat':ds_mean.lat.data}
+    elif 'pentad' in ds_mean.dims:
+        data = data = {'omega':ds_mean.omega.data, 'vcomp':ds_mean.vcomp.data, 'time':ds_mean.pentad.data, 'pfull':ds_mean.pfull.data, 'lat':ds_mean.lat.data}
+    else:
+        print('No time dimension found in psi_calc. About to break')
+        raise Exception('Whoops')
     psi = cal_stream_fn(data)
-    ds_mean['psi'] = (('time','pfull','lat'), psi)
+    ds_mean['psi'] = (ds_mean.omega.dims, psi)
     return ds_mean
 
 
@@ -574,13 +684,13 @@ def calc_emf(ds):
     uv_dy = gr.ddy(uv, uv=True)
     
     uw = -86400. * (ds.ucomp_omega - ds.ucomp*ds.omega)
-    uw_dy = gr.ddp(uw)
+    uw_dp = gr.ddp(uw)
 
     
-    ds['uv'] = (('time', 'pfull', 'lat'), uv)
-    ds['uv_dy'] = (('time', 'pfull', 'lat'), uv_dy)
-    ds['uw'] = (('time', 'pfull', 'lat'), uw)
-    ds['uw_dy'] = (('time', 'pfull', 'lat'), uw_dy)   
+    ds['uv'] = (ds.ucomp.dims, uv)
+    ds['uv_dy'] = (ds.ucomp.dims, uv_dy)
+    ds['uw'] = (ds.ucomp.dims, uw)
+    ds['uw_dp'] = (ds.ucomp.dims, uw_dp)   
     return ds
 
     
